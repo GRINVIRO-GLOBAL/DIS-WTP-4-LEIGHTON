@@ -1,0 +1,160 @@
+PROGRAM Prog1
+(* ======================================================== *)
+(* BAGIAN 1: INPUT MAPPING & SCALING                        *)
+(* ======================================================== *)
+
+FLOW_VALUE_CMH := (ANY_TO_REAL(AI_01_FT101) / 65535.0) * 50.0;
+
+(* Mapping Sensor Level (_IO_EM_DI_05) *)
+IF _IO_EM_DI_05 = FALSE THEN
+    LEVEL_IS_LOW := TRUE;
+ELSE
+    LEVEL_IS_LOW := FALSE;
+END_IF;
+
+(* ======================================================== *)
+(* BAGIAN 2: INTERLOCK & PROTEKSI (FAIL-SAFE)               *)
+(* ======================================================== *)
+
+(* KONDISI 1: Emergency Stop (DI_00) *)
+IF (_IO_EM_DI_00 = FALSE) THEN
+    _IO_EM_DO_02 := FALSE; (* Matikan Pompa A *)
+    _IO_EM_DO_03 := FALSE; (* Matikan Pompa B *)
+    _IO_EM_DO_05 := FALSE;
+    _IO_EM_DO_06 := FALSE;
+    AUTO_MODE := FALSE;
+    STEP_SEQUENCE := 0;
+    TMR_ENABLE := FALSE;
+    
+    (* Reset Timer Shifting juga biar aman *)
+    RUN_SHIFT_TMR_PUMP_XX := FALSE; 
+
+(* KONDISI 2: Level Low (DI_05) HANYA SAAT AUTO *)
+ELSIF (LEVEL_IS_LOW = TRUE) AND (AUTO_MODE = TRUE) THEN
+    _IO_EM_DO_02 := FALSE; 
+    _IO_EM_DO_03 := FALSE; 
+    _IO_EM_DO_05 := FALSE;
+    _IO_EM_DO_06 := FALSE;
+    
+    AUTO_MODE := FALSE; 
+    STEP_SEQUENCE := 0;
+    TMR_ENABLE := FALSE;
+    RUN_SHIFT_TMR_PUMP_XX := FALSE;
+END_IF;
+
+(* ======================================================== *)
+(* BAGIAN 3: SEQUENCE CONTROL (LOGIKA UTAMA)                *)
+(* ======================================================== *)
+
+IF (AUTO_MODE = TRUE) AND (LEVEL_IS_LOW = FALSE) THEN
+
+    CASE STEP_SEQUENCE OF
+        0:  (* Step 0: Standby *)
+            _IO_EM_DO_02 := FALSE;
+            _IO_EM_DO_03 := FALSE;
+            _IO_EM_DO_05 := FALSE;
+            _IO_EM_DO_06 := FALSE;
+            TMR_ENABLE := FALSE;
+            
+            (* Timer Shift Stop dulu saat standby *)
+            RUN_SHIFT_TMR_PUMP_XX := FALSE; 
+            
+            (* Syarat Start *)
+            IF (_IO_EM_DI_05 = TRUE) THEN
+                STEP_SEQUENCE := 1; 
+            END_IF;
+
+        1:  (* Step 1: Filtrasi Jalur 1 (MMF-01) *)
+            _IO_EM_DO_05 := TRUE;  (* BUKA Valve 1 *)
+            _IO_EM_DO_06 := FALSE;
+            
+            (* === LOGIKA SHIFTING POMPA TP-XX === *)
+            (* Menggunakan variabel: PUMP_XX_TURN *)
+            IF PUMP_XX_TURN = TRUE THEN
+                _IO_EM_DO_02 := TRUE;  (* Jalan Pompa TP-XXA *)
+                _IO_EM_DO_03 := FALSE; (* Mati Pompa TP-XXB *)
+            ELSE
+                _IO_EM_DO_02 := FALSE; (* Mati Pompa TP-XXA *)
+                _IO_EM_DO_03 := TRUE;  (* Jalan Pompa TP-XXB *)
+            END_IF;
+            
+            (* Jalankan Timer Sequence & Timer Shifting *)
+            TMR_ENABLE := TRUE;
+            RUN_SHIFT_TMR_PUMP_XX := TRUE; (* Timer Shifting ON *)
+            
+            IF TIMER_SERVICE.Q THEN
+                TMR_ENABLE := FALSE; 
+                STEP_SEQUENCE := 3;
+            END_IF;
+
+        3:  (* Step 3: Filtrasi Jalur 2 (MMF-02) *)
+            _IO_EM_DO_05 := FALSE;
+            _IO_EM_DO_06 := TRUE;  (* BUKA Valve 2 *)
+            
+            (* === LOGIKA SHIFTING POMPA TP-XX === *)
+            (* Giliran tetap dipertahankan (tidak berubah saat pindah valve) *)
+            IF PUMP_XX_TURN = TRUE THEN
+                _IO_EM_DO_02 := TRUE;
+                _IO_EM_DO_03 := FALSE;
+            ELSE
+                _IO_EM_DO_02 := FALSE;
+                _IO_EM_DO_03 := TRUE;
+            END_IF;
+            
+            TMR_ENABLE := TRUE;
+            RUN_SHIFT_TMR_PUMP_XX := TRUE; (* Timer Shifting Tetap ON *)
+            
+            IF TIMER_SERVICE.Q THEN
+                TMR_ENABLE := FALSE;
+                STEP_SEQUENCE := 1;
+            END_IF;
+            
+        5:  (* Step 5: Stop *)
+            _IO_EM_DO_02 := FALSE;
+            _IO_EM_DO_03 := FALSE;
+            _IO_EM_DO_05 := FALSE;
+            _IO_EM_DO_06 := FALSE;
+            RUN_SHIFT_TMR_PUMP_XX := FALSE;
+            STEP_SEQUENCE := 0;
+    END_CASE;
+
+ELSE
+    (* MODE MANUAL: Reset Logic *)
+    TMR_ENABLE := FALSE;
+    RUN_SHIFT_TMR_PUMP_XX := FALSE;
+    STEP_SEQUENCE := 0;
+    (* Output bebas dikendalikan manual *)
+END_IF;
+
+(* ======================================================== *)
+(* BAGIAN 4: TIMERS (Sequence & Shifting)                   *)
+(* ======================================================== *)
+
+(* 1. Timer Sequence (Perpindahan Valve) *)
+TIMER_SERVICE(IN := TMR_ENABLE, PT := T#10s);
+
+(* 2. Timer Shifting Pompa TP-XX *)
+(* TRIK PRO: Tambahkan "AND NOT ...Q" di dalam input IN *)
+(* Artinya: Kalau Timer selesai (Q nyala), Input otomatis putus sebentar untuk Reset *)
+(* Jadi kamu TIDAK PERLU memanggil timer lagi di bawah *)
+
+SHIFT_TIMER_PUMP_XX(IN := RUN_SHIFT_TMR_PUMP_XX AND NOT SHIFT_TIMER_PUMP_XX.Q, PT := SHIFT_DURATION_PUMP_XX);
+
+(* Jika Timer Selesai (.Q), Cukup Tukar Giliran *)
+(* Tidak perlu reset manual lagi, karena sudah auto-reset di baris atas *)
+IF SHIFT_TIMER_PUMP_XX.Q THEN
+    (* Tukar Giliran: Kalau TRUE jadi FALSE, Kalau FALSE jadi TRUE *)
+    PUMP_XX_TURN := NOT PUMP_XX_TURN; 
+END_IF;
+
+(* ======================================================== *)
+(* BAGIAN 5: ALARM                                          *)
+(* ======================================================== *)
+
+(* Alarm Low Flow: Cek Pompa manapun (A atau B) yang lagi nyala *)
+IF ((_IO_EM_DO_02 = TRUE) OR (_IO_EM_DO_03 = TRUE)) AND (FLOW_VALUE_CMH < 5.0) THEN 
+    NewVariable2 := TRUE; 
+ELSE
+    NewVariable2 := FALSE;
+END_IF;
+END_PROGRAM
