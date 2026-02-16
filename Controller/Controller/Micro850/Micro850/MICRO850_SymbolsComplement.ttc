@@ -1,0 +1,8 @@
+[BEGIN FB INPUTS]
+I1=micro850.micro850.prog1/timer_service.in,0x44D,BOOL
+I2=micro850.micro850.prog1/timer_service.pt,0x1E2C,TIME
+I3=micro850.micro850.timer_service.in,0x1E30,BOOL
+I4=micro850.micro850.timer_service.pt,0x1E34,TIME
+I5=micro850.micro850.timer_switch.in,0x1E30,BOOL
+I6=micro850.micro850.timer_switch.pt,0x1E34,TIME
+[END]
