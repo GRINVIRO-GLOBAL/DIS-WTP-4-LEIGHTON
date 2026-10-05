@@ -1,2 +1,10 @@
 <modbusServer Version="2.0">
+  <modbusRegister name="HOLDING_REGISTERS">
+    <mapping variable="MB_AE101_RAW" parent="Micro850" dataType="Real" address="400001" va="0x5bc">
+      <MBVarInfo ElemType="Real" SubElemType="Any" DataTypeSize="4" />
+    </mapping>
+    <mapping variable="MB_AE102_RAW" parent="Micro850" dataType="Real" address="400003" va="0x5c0">
+      <MBVarInfo ElemType="Real" SubElemType="Any" DataTypeSize="4" />
+    </mapping>
+  </modbusRegister>
 </modbusServer>

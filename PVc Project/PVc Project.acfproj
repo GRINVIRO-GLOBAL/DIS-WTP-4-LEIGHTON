@@ -12,5 +12,6 @@
     <UniqueProjectId>{99999999-9999-9999-9999-999999999999}</UniqueProjectId>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Online' " />
+  <PropertyGroup Condition=" '$(Configuration)' == 'Simulation' " />
   <Import Project="$(DevEnvDir)\PackagesToLoad\Targets\ISaGRAF.ISaGRAF5.targets" />
 </Project>

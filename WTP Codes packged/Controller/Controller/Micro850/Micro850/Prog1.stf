@@ -1,0 +1,390 @@
+PROGRAM Prog1
+(* ============================================================ *)
+(* WTP CONTROL SYSTEM - LEIGHTON SPEC - FINAL GOLD              *)
+(* ============================================================ *)
+
+(* ================= 0. INITIALIZATION & SAFETY ================= *)
+
+IF __SYSVA_FIRST_SCAN THEN
+    (* 1. Setpoint Waktu (Inisialisasi angka HMI-nya, bukan format TIME-nya) *)
+    HMI_SP_SERVICE_HR    := 48.0; (* Default 48 Jam *)
+    HMI_SP_BW_MIN        := 10.0; (* Default 10 Menit *)
+    HMI_SP_RINSE_MIN     := 5.0;  (* Default 5 Menit *)
+    HMI_SP_INTERVAL_HR   := 24.0; (* Default 24 Jam *)
+    HMI_SP_SHIFT_HR      := 8.0;  (* Default 8 Jam *)
+    HMI_SP_DELAY_SEC     := 10.0; (* Default 10 Detik *)
+    
+    (* 2. Setpoint Analog Alarm (Tetap sama, karena HMI langsung baca/tulis ke sini) *)
+    SP_FLOW_HIGH_TRIP    := 10.5;
+    SP_FLOW_LOW_TRIP     := 8.0;
+    SP_CL_HIGH_ALARM     := 0.03;
+    SP_CL_LOW_ALARM      := 0.00;
+    
+    (* Reset Sequence *)
+    STEP_SEQUENCE := 0;
+    BW_STEP_SEQUENCE := 0;
+    
+    (* Default Shifting *)
+    PUMP_XX_TURN := FALSE;
+    TP01_TURN_A := TRUE;
+    
+    (* Default Mode *)
+    AUTO_MODE := FALSE; 
+END_IF;
+
+
+(* ================= 0A. HMI PARAMETER CONVERSION ================= *)
+(* Letakkan ini di luar IF __SYSVA_FIRST_SCAN agar dieksekusi terus-menerus *)
+
+(* 1 Jam = 3,600,000 ms *)
+SP_TIME_SERVICE      := ANY_TO_TIME(ANY_TO_DINT(HMI_SP_SERVICE_HR * 3600000.0));
+SP_TIME_BW_INTERVAL  := ANY_TO_TIME(ANY_TO_DINT(HMI_SP_INTERVAL_HR * 3600000.0));
+SP_TIME_PUMP_SHIFT   := ANY_TO_TIME(ANY_TO_DINT(HMI_SP_SHIFT_HR * 3600000.0));
+
+(* 1 Menit = 60,000 ms *)
+SP_TIME_BW_RUN       := ANY_TO_TIME(ANY_TO_DINT(HMI_SP_BW_MIN * 60000.0));
+SP_TIME_RINSE        := ANY_TO_TIME(ANY_TO_DINT(HMI_SP_RINSE_MIN * 60000.0));
+
+(* 1 Detik = 1,000 ms *)
+SP_TIME_FLOW_DELAY   := ANY_TO_TIME(ANY_TO_DINT(HMI_SP_DELAY_SEC * 1000.0));
+
+
+(* ================= 1. INPUT MONITORING & TRIP DETECTION ================= *)
+
+(* A. ANALOG SENSORS *)
+FLOW_VALUE_CMH := ANY_TO_REAL(AI_01_FT101) / 65535.0 * 50.0;
+CL_VALUE_PPM := ANY_TO_REAL(AI_02_AE101) / 65535.0 * 2.0;
+
+(* B. PUMP TRIP DETECTION *)
+FAULT_TP01A := _IO_EM_DI_01; 
+FAULT_TP01B := _IO_EM_DI_02; 
+FAULT_TPXXA := _IO_EM_DI_03; 
+FAULT_TPXXB := _IO_EM_DI_04; 
+
+(* C. HMI ALARM MAPPING (Diluar kondisi agar HMI selalu bisa baca!) *)
+LEVEL_RAW_IS_LOW := NOT DI_25_LS101; 
+
+(* Panggil Timer HANYA SATU KALI *)
+TMR_FLOW_DELAY(IN := AUTO_MODE AND ((_IO_EM_DO_02 OR _IO_EM_DO_03) AND (NOT SHIFT_TRIGGER.Q)), PT := SP_TIME_FLOW_DELAY);
+
+(* Flow Alarm Logic *)
+IF AUTO_MODE THEN 
+    IF TMR_FLOW_DELAY.Q THEN
+        IF (FLOW_VALUE_CMH > SP_FLOW_HIGH_TRIP) OR (FLOW_VALUE_CMH < SP_FLOW_LOW_TRIP) THEN
+            FLOW_ALARM_TRIP := TRUE;
+        END_IF;
+    END_IF;
+ELSE
+    FLOW_ALARM_TRIP := FALSE;
+END_IF;
+
+IF HMI_RESET_BTN THEN 
+    FLOW_ALARM_TRIP := FALSE; 
+END_IF;
+
+(* C. SAFETY TRIP (GLOBAL & CONDITIONAL) *)
+IF AUTO_MODE THEN
+    TRIP_STATUS := HMI_EMERGENCY_STOP OR LEVEL_RAW_IS_LOW OR FLOW_ALARM_TRIP;
+ELSE
+    TRIP_STATUS := HMI_EMERGENCY_STOP;
+END_IF;
+
+
+(* ================= 2. MODE SELECTION ================= *)
+
+(* Pengecekan Syarat Auto *)
+IF HMI_BTN_SET_AUTO THEN
+    IF HMI_EMERGENCY_STOP OR LEVEL_RAW_IS_LOW OR FLOW_ALARM_TRIP THEN
+        AUTO_MODE := FALSE;
+        HMI_BTN_SET_AUTO := FALSE;
+    ELSE
+        AUTO_MODE := TRUE;
+        HMI_BTN_SET_MANUAL := FALSE;
+    END_IF;
+END_IF;
+
+IF HMI_BTN_SET_MANUAL THEN
+    AUTO_MODE := FALSE;
+    HMI_BTN_SET_AUTO := FALSE;
+END_IF;
+
+(* Interlock Berjalan *)
+IF TRIP_STATUS THEN
+    AUTO_MODE := FALSE;
+    HMI_BTN_SET_AUTO := FALSE;
+    HMI_BTN_SET_MANUAL := TRUE;
+END_IF;
+
+(* ================= 3. AUTO SEQUENCE LOGIC ================= *)
+
+IF AUTO_MODE AND (NOT TRIP_STATUS) THEN
+
+    (* --- LOGIC RAW WATER --- *)
+    IF TARGET_TANK_FULL OR BW_ACTIVE_FLAG THEN
+        SEQ_TIMER_IN := FALSE; 
+    ELSE
+        IF STEP_SEQUENCE = 0 THEN
+             AT_SUBSTEP := 0;
+             IF (NOT TARGET_TANK_FULL) AND (NOT BW_ACTIVE_FLAG) THEN STEP_SEQUENCE := 1; END_IF;
+        END_IF;
+
+        CASE STEP_SEQUENCE OF
+        1: (* MMF-01 Service *)
+           CASE AT_SUBSTEP OF
+           0: SEQ_TIMER_PT := SP_TIME_SERVICE; SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=1; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           1: SEQ_TIMER_PT := SP_TIME_BW_RUN;  SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=2; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           2: SEQ_TIMER_PT := SP_TIME_RINSE;   SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN STEP_SEQUENCE:=2; AT_SUBSTEP:=0; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           END_CASE;
+        2: (* ACF-01 Service *)
+           CASE AT_SUBSTEP OF
+           0: SEQ_TIMER_PT := SP_TIME_SERVICE; SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=1; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           1: SEQ_TIMER_PT := SP_TIME_BW_RUN;  SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=2; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           2: SEQ_TIMER_PT := SP_TIME_RINSE;   SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN STEP_SEQUENCE:=3; AT_SUBSTEP:=0; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           END_CASE;
+        3: (* MMF-02 Service *)
+           CASE AT_SUBSTEP OF
+           0: SEQ_TIMER_PT := SP_TIME_SERVICE; SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=1; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           1: SEQ_TIMER_PT := SP_TIME_BW_RUN;  SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=2; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           2: SEQ_TIMER_PT := SP_TIME_RINSE;   SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN STEP_SEQUENCE:=4; AT_SUBSTEP:=0; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           END_CASE;
+        4: (* ACF-02 Service *)
+           CASE AT_SUBSTEP OF
+           0: SEQ_TIMER_PT := SP_TIME_SERVICE; SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=1; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           1: SEQ_TIMER_PT := SP_TIME_BW_RUN;  SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN AT_SUBSTEP:=2; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           2: SEQ_TIMER_PT := SP_TIME_RINSE;   SEQ_TIMER_IN := TRUE; IF SEQ_TIMER.Q THEN STEP_SEQUENCE:=5; AT_SUBSTEP:=0; SEQ_TIMER_IN:=FALSE; TIMER_RESET_TRIG:=TRUE; END_IF;
+           END_CASE;
+        5: (* Reset Loop *)
+           STEP_SEQUENCE := 0;
+        END_CASE;
+    END_IF;
+
+    IF TIMER_RESET_TRIG THEN SEQ_TIMER_IN := FALSE; END_IF;
+
+    (* --- LOGIC BACKWASH --- *)
+    BW_INTERVAL_TIMER(IN := TRUE, PT := SP_TIME_BW_INTERVAL);
+    
+    IF (BW_INTERVAL_TIMER.Q) AND (TARGET_TANK_FULL) THEN
+        IF BW_STEP_SEQUENCE = 0 THEN BW_STEP_SEQUENCE := 1; END_IF;
+    END_IF;
+    
+    IF NOT TARGET_TANK_FULL THEN 
+        BW_STEP_SEQUENCE := 0; 
+        BW_ACTIVE_FLAG := FALSE; 
+    END_IF;
+    
+    BW_TIMER_RESET_TRIG := FALSE;
+    
+    IF BW_STEP_SEQUENCE > 0 THEN
+        BW_ACTIVE_FLAG := TRUE;
+        CASE BW_STEP_SEQUENCE OF
+        1: (* MMF-01 BW *)
+           CASE BW_SUBSTEP OF
+           0: BW_SEQ_TIMER_PT := SP_TIME_BW_RUN; IF BW_SEQ_TIMER.Q THEN BW_SUBSTEP := 1; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           1: BW_SEQ_TIMER_PT := SP_TIME_RINSE;  IF BW_SEQ_TIMER.Q THEN BW_STEP_SEQUENCE := 2; BW_SUBSTEP := 0; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           END_CASE;
+        2: (* ACF-01 BW *)
+           CASE BW_SUBSTEP OF
+           0: BW_SEQ_TIMER_PT := SP_TIME_BW_RUN; IF BW_SEQ_TIMER.Q THEN BW_SUBSTEP := 1; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           1: BW_SEQ_TIMER_PT := SP_TIME_RINSE;  IF BW_SEQ_TIMER.Q THEN BW_STEP_SEQUENCE := 3; BW_SUBSTEP := 0; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           END_CASE; 
+        3: (* MMF-02 BW *)
+           CASE BW_SUBSTEP OF
+           0: BW_SEQ_TIMER_PT := SP_TIME_BW_RUN; IF BW_SEQ_TIMER.Q THEN BW_SUBSTEP := 1; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           1: BW_SEQ_TIMER_PT := SP_TIME_RINSE;  IF BW_SEQ_TIMER.Q THEN BW_STEP_SEQUENCE := 4; BW_SUBSTEP := 0; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           END_CASE;
+        4: (* ACF-02 BW *)
+           CASE BW_SUBSTEP OF
+           0: BW_SEQ_TIMER_PT := SP_TIME_BW_RUN; IF BW_SEQ_TIMER.Q THEN BW_SUBSTEP := 1; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           1: BW_SEQ_TIMER_PT := SP_TIME_RINSE;  IF BW_SEQ_TIMER.Q THEN BW_STEP_SEQUENCE := 5; BW_SUBSTEP := 0; BW_TIMER_RESET_TRIG := TRUE; END_IF;
+           END_CASE;
+        5: (* Finish *)
+           BW_ACTIVE_FLAG := FALSE;
+           BW_STEP_SEQUENCE := 0;
+           TP01_TURN_A := NOT TP01_TURN_A; 
+        END_CASE;
+    ELSE
+        BW_ACTIVE_FLAG := FALSE;
+        BW_SUBSTEP := 0;
+    END_IF;
+    
+    IF BW_TIMER_RESET_TRIG OR (BW_STEP_SEQUENCE = 0) THEN BW_SEQ_TIMER_IN := FALSE; ELSE BW_SEQ_TIMER_IN := TRUE; END_IF;
+
+
+    (* ================= 4. OUTPUT LOGIC GENERATION ================= *)
+
+    (* --- RAW WATER PUMP (TP-XX) --- *)
+    AUTO_CMD_PUMP_RUN := (STEP_SEQUENCE >= 1) AND (STEP_SEQUENCE <= 4) AND (NOT TARGET_TANK_FULL) AND (NOT BW_ACTIVE_FLAG);
+    
+    SHIFT_TIMER(IN := AUTO_CMD_PUMP_RUN, PT := SP_TIME_PUMP_SHIFT);
+    SHIFT_TRIGGER(CLK := SHIFT_TIMER.Q);
+    IF SHIFT_TRIGGER.Q THEN PUMP_XX_TURN := NOT PUMP_XX_TURN; END_IF;
+    
+    IF AUTO_CMD_PUMP_RUN THEN
+        IF PUMP_XX_TURN THEN
+            IF NOT FAULT_TPXXA THEN 
+                INT_CMD_TPXXA := TRUE; INT_CMD_TPXXB := FALSE; 
+            ELSIF NOT FAULT_TPXXB THEN
+                INT_CMD_TPXXA := FALSE; INT_CMD_TPXXB := TRUE; 
+            ELSE
+                INT_CMD_TPXXA := FALSE; INT_CMD_TPXXB := FALSE; 
+            END_IF;
+        ELSE
+            IF NOT FAULT_TPXXB THEN 
+                INT_CMD_TPXXA := FALSE; INT_CMD_TPXXB := TRUE; 
+            ELSIF NOT FAULT_TPXXA THEN
+                INT_CMD_TPXXA := TRUE; INT_CMD_TPXXB := FALSE; 
+            ELSE
+                INT_CMD_TPXXA := FALSE; INT_CMD_TPXXB := FALSE; 
+            END_IF;
+        END_IF;
+    ELSE
+        INT_CMD_TPXXA := FALSE; INT_CMD_TPXXB := FALSE;
+    END_IF;
+    
+    (* --- BACKWASH PUMP (TP-01) --- *)
+    AUTO_CMD_TP01_RUN := (BW_STEP_SEQUENCE >= 1) AND (BW_STEP_SEQUENCE <= 4);
+    
+    IF AUTO_CMD_TP01_RUN THEN
+        IF TP01_TURN_A THEN
+            IF NOT FAULT_TP01A THEN 
+                INT_CMD_TP01A := TRUE; INT_CMD_TP01B := FALSE;
+            ELSIF NOT FAULT_TP01B THEN
+                INT_CMD_TP01A := FALSE; INT_CMD_TP01B := TRUE; 
+            ELSE
+                INT_CMD_TP01A := FALSE; INT_CMD_TP01B := FALSE;
+            END_IF;
+        ELSE
+            IF NOT FAULT_TP01B THEN 
+                INT_CMD_TP01A := FALSE; INT_CMD_TP01B := TRUE;
+            ELSIF NOT FAULT_TP01A THEN
+                INT_CMD_TP01A := TRUE; INT_CMD_TP01B := FALSE; 
+            ELSE
+                INT_CMD_TP01A := FALSE; INT_CMD_TP01B := FALSE;
+            END_IF;
+        END_IF;
+    ELSE
+        INT_CMD_TP01A := FALSE; INT_CMD_TP01B := FALSE;
+    END_IF;
+
+    (* --- VALVES --- *)
+    AUTO_CMD_DP01_RUN := AUTO_CMD_PUMP_RUN; 
+    
+    IF BW_ACTIVE_FLAG THEN
+        AUTO_CMD_VES101 := FALSE; AUTO_CMD_VES107 := FALSE;
+    ELSE
+        IF (STEP_SEQUENCE = 1) OR (STEP_SEQUENCE = 2) THEN AUTO_CMD_VES101 := TRUE; ELSE AUTO_CMD_VES101 := FALSE; END_IF;
+        IF (STEP_SEQUENCE = 3) OR (STEP_SEQUENCE = 4) THEN AUTO_CMD_VES107 := TRUE; ELSE AUTO_CMD_VES107 := FALSE; END_IF;
+    END_IF;
+    
+    AUTO_CMD_VES119 := (BW_STEP_SEQUENCE = 1);
+    AUTO_CMD_VES120 := (BW_STEP_SEQUENCE = 2);
+    AUTO_CMD_VES121 := (BW_STEP_SEQUENCE = 3);
+    AUTO_CMD_VES122 := (BW_STEP_SEQUENCE = 4);
+
+ELSE
+    (* MANUAL MODE / TRIP - Reset All Flags *)
+    STEP_SEQUENCE := 0; BW_STEP_SEQUENCE := 0;
+    
+    (* Reset Timer Flags (Logic only, no function call) *)
+    SEQ_TIMER_IN := FALSE; 
+    BW_SEQ_TIMER_IN := FALSE;
+    
+    (* Reset Internal Commands *)
+    INT_CMD_TPXXA := FALSE; INT_CMD_TPXXB := FALSE;
+    INT_CMD_TP01A := FALSE; INT_CMD_TP01B := FALSE;
+    AUTO_CMD_DP01_RUN := FALSE;
+    AUTO_CMD_VES101 := FALSE; AUTO_CMD_VES107 := FALSE;
+    AUTO_CMD_VES119 := FALSE; AUTO_CMD_VES120 := FALSE;
+    AUTO_CMD_VES121 := FALSE; AUTO_CMD_VES122 := FALSE;
+END_IF;
+
+
+(* ======================================================================= *)
+(* EXECUTE TIMER (DI LUAR IF/ELSE)                                         *)
+(* ======================================================================= *)
+SEQ_TIMER(IN := SEQ_TIMER_IN, PT := SEQ_TIMER_PT);
+BW_SEQ_TIMER(IN := BW_SEQ_TIMER_IN, PT := BW_SEQ_TIMER_PT);
+
+
+(* ================= 5. PHYSICAL OUTPUT MAPPING ================= *)
+
+IF TRIP_STATUS THEN
+    (* EMERGENCY: FORCE OFF *)
+    _IO_EM_DO_00 := FALSE; _IO_EM_DO_01 := FALSE; 
+    _IO_EM_DO_02 := FALSE; _IO_EM_DO_03 := FALSE; 
+    _IO_EM_DO_04 := FALSE; 
+    _IO_EM_DO_05 := FALSE; _IO_EM_DO_06 := FALSE; 
+    _IO_EM_DO_07 := FALSE; _IO_EM_DO_08 := FALSE; 
+    _IO_EM_DO_09 := FALSE; DO_10_AV122  := FALSE; 
+
+ELSIF AUTO_MODE THEN
+    (* AUTO: Write Logic to Output *)
+    _IO_EM_DO_00 := INT_CMD_TP01A; 
+    _IO_EM_DO_01 := INT_CMD_TP01B;
+    _IO_EM_DO_02 := INT_CMD_TPXXA; 
+    _IO_EM_DO_03 := INT_CMD_TPXXB;
+    _IO_EM_DO_04 := AUTO_CMD_DP01_RUN; 
+    _IO_EM_DO_05 := AUTO_CMD_VES107; 
+    _IO_EM_DO_06 := AUTO_CMD_VES101; 
+    _IO_EM_DO_07 := AUTO_CMD_VES119; 
+    _IO_EM_DO_08 := AUTO_CMD_VES120; 
+    _IO_EM_DO_09 := AUTO_CMD_VES121; 
+    DO_10_AV122  := AUTO_CMD_VES122; 
+
+ELSE
+    (* MANUAL: Release Output (Operator Control via HMI) *)
+    (* Kosongkan bagian ini agar HMI bisa mengontrol Output langsung *)
+END_IF;
+
+
+(* ================= 6. HMI FEEDBACK ================= *)
+IF STEP_SEQUENCE = 1 THEN VIS_MMF1_SVC := TRUE; ELSE VIS_MMF1_SVC := FALSE; END_IF;
+IF BW_STEP_SEQUENCE = 1 THEN VIS_MMF1_BW := TRUE; ELSE VIS_MMF1_BW := FALSE; END_IF;
+
+IF STEP_SEQUENCE = 2 THEN VIS_ACF1_SVC := TRUE; ELSE VIS_ACF1_SVC := FALSE; END_IF;
+IF BW_STEP_SEQUENCE = 2 THEN VIS_ACF1_BW := TRUE; ELSE VIS_ACF1_BW := FALSE; END_IF;
+
+IF STEP_SEQUENCE = 3 THEN VIS_MMF2_SVC := TRUE; ELSE VIS_MMF2_SVC := FALSE; END_IF;
+IF BW_STEP_SEQUENCE = 3 THEN VIS_MMF2_BW := TRUE; ELSE VIS_MMF2_BW := FALSE; END_IF;
+
+IF STEP_SEQUENCE = 4 THEN VIS_ACF2_SVC := TRUE; ELSE VIS_ACF2_SVC := FALSE; END_IF;
+IF BW_STEP_SEQUENCE = 4 THEN VIS_ACF2_BW := TRUE; ELSE VIS_ACF2_BW := FALSE; END_IF;
+
+
+(* ================= 7. HMI ACTUAL TIME MONITORING ================= *)
+(* Membaca Elapsed Time (.ET) dan menampilkannya sesuai Substep yang aktif *)
+
+(* A. Actual Service Time (Hanya jalan saat AT_SUBSTEP = 0) *)
+IF (STEP_SEQUENCE > 0) AND (AT_SUBSTEP = 0) THEN
+    HMI_ACT_SERVICE_HR := ANY_TO_REAL(ANY_TO_DINT(SEQ_TIMER.ET)) / 3600000.0;
+ELSE
+    HMI_ACT_SERVICE_HR := 0.0;
+END_IF;
+
+(* B. Actual Backwash Time (Bisa dari Sequence Utama atau Interval BW) *)
+IF (STEP_SEQUENCE > 0) AND (AT_SUBSTEP = 1) THEN
+    HMI_ACT_BW_MIN := ANY_TO_REAL(ANY_TO_DINT(SEQ_TIMER.ET)) / 60000.0;
+ELSIF (BW_ACTIVE_FLAG) AND (BW_SUBSTEP = 0) THEN
+    HMI_ACT_BW_MIN := ANY_TO_REAL(ANY_TO_DINT(BW_SEQ_TIMER.ET)) / 60000.0;
+ELSE
+    HMI_ACT_BW_MIN := 0.0;
+END_IF;
+
+(* C. Actual Rinse Time (Bisa dari Sequence Utama atau Interval BW) *)
+IF (STEP_SEQUENCE > 0) AND (AT_SUBSTEP = 2) THEN
+    HMI_ACT_RINSE_MIN := ANY_TO_REAL(ANY_TO_DINT(SEQ_TIMER.ET)) / 60000.0;
+ELSIF (BW_ACTIVE_FLAG) AND (BW_SUBSTEP = 1) THEN
+    HMI_ACT_RINSE_MIN := ANY_TO_REAL(ANY_TO_DINT(BW_SEQ_TIMER.ET)) / 60000.0;
+ELSE
+    HMI_ACT_RINSE_MIN := 0.0;
+END_IF;
+
+(* D. Actual Interval Time (Selalu jalan menghitung mundur ke BW berikutnya) *)
+HMI_ACT_INTERVAL_HR := ANY_TO_REAL(ANY_TO_DINT(BW_INTERVAL_TIMER.ET)) / 3600000.0;
+
+(* E. Actual Pump Shift Time (Hanya jalan saat pompa suplai menyala) *)
+HMI_ACT_SHIFT_HR := ANY_TO_REAL(ANY_TO_DINT(SHIFT_TIMER.ET)) / 3600000.0;
+
+(* F. Actual Flow Delay Time (Hanya jalan di 10 detik awal pompa nyala) *)
+HMI_ACT_DELAY_SEC := ANY_TO_REAL(ANY_TO_DINT(TMR_FLOW_DELAY.ET)) / 1000.0;
+END_PROGRAM

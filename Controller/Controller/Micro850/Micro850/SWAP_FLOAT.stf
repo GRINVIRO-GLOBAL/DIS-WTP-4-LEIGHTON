@@ -1,0 +1,27 @@
+FUNCTION_BLOCK SWAP_FLOAT
+#info= QLD
+BOF
+
+
+(**)
+
+SOR  [0,1] (**) (**)  FB  [1,0] (*1 gain*) (*1*) ( (*EN:EN*)(**) (**)  , (*i1:*)(*In_Low*) (**) ; (*ENO:ENO*)(**) (**)  , (*o1:*)(*Temp_Arr[1]*) (**) )
+EOR [4,0]
+
+
+(**)
+
+SOR  [0,4] (**) (**)  FB  [1,0] (*1 gain*) (*1*) ( (*EN:EN*)(**) (**)  , (*i1:*)(*In_High*) (**) ; (*ENO:ENO*)(**) (**)  , (*o1:*)(*Temp_Arr[2]*) (**) )
+EOR [4,0]
+
+
+(**)
+
+SOR  [0,7] (**) (**)  FB  [1,0] (*COP*) (*COP_1*) ( (*Enable:*)(**) (**)  , (*Src:*)(*Temp_Arr[1]*) (**)  , (*SrcOffset:*)(**) (**)  , (*Dest:*)(*Out_Real*) (**)  , (*DestOffset:*)(**) (**)  , (*Length:*)(*1*) (**)  , (*Swap:*)(**) (**)  , (*__ADI_Src:*)(**) (**)  , (*__ADI_Dest:*)(**) (**)  , (*__DTI_Src:*)(**) (**)  , (*__DTI_Dest:*)(**) (**) ; (*ENO:ENO*)(**) (**)  , (*Sts:*)(**) (**) )
+EOR [4,0]
+EOF
+#end_info
+#info= ID_MAX
+NextId=1
+#end_info
+END_FUNCTION_BLOCK
